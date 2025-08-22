@@ -23,8 +23,9 @@ class FinalDemo:
         
     def load_ml_model(self):
         """Load the trained ML model"""
-        if os.path.exists('models/collision_predictor.pkl'):
-            with open('models/collision_predictor.pkl', 'rb') as f:
+        model_path = '../models/collision_predictor.pkl'
+        if os.path.exists(model_path):
+            with open(model_path, 'rb') as f:
                 return pickle.load(f)
         return None
     
@@ -362,23 +363,10 @@ class FinalDemo:
         print("   • Collision checks: 6")
         print("   • ML predictions: " + ("Active" if self.ml_model else "N/A"))
         print("   • Threats detected: " + ("1 CRITICAL" if collision_found else "0"))
-        
-        if critical_event:
-            print("\n💡 VALUE DELIVERED:")
-            print("   • Protected $150 billion ISS")
-            print("   • Saved 7 astronaut lives")
-            print("   • Prevented cascading debris event")
-            print("   • Maintained space sustainability")
-        
-        print("\n🚀 READY FOR DEPLOYMENT TO:")
-        print("   • NASA Mission Control")
-        print("   • Space Force Operations")
-        print("   • Commercial Satellite Operators")
-        print("   • International Space Agencies")
+    
         
         print("\n" + "─"*70)
         print("Thank you for viewing the Satellite Collision Avoidance System")
-        print("Protecting humanity's assets in space through AI and automation")
         print("─"*70 + "\n")
 
 

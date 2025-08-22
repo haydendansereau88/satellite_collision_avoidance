@@ -1,185 +1,343 @@
-from satellite import Satellite
-from collision_detector import CollisionDetector
-from visualizer import OrbitVisualizer
-from datetime import datetime
 import numpy as np
-import plotly.graph_objects as go
+import os
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+from satellite import Satellite
 
-# Real TLE data for multiple satellites
-SATELLITES = {
-    "ISS": [
+class ManeuverPlanner:
+    """AI-powered orbital maneuver planning for collision avoidance"""
+    
+    def __init__(self):
+        self.fuel_weight = 0.3  # Importance of fuel efficiency
+        self.safety_weight = 0.7  # Importance of collision avoidance
+        self.max_delta_v = 10.0  # Maximum velocity change (m/s)
+        
+    def calculate_maneuver(self, sat1, sat2, collision_time_minutes):
+        """Calculate optimal avoidance maneuver using optimization"""
+        
+        print("\n🚀 CALCULATING OPTIMAL AVOIDANCE MANEUVER")
+        print("=" * 60)
+        
+        # Get current orbital parameters
+        current_time = datetime.now()
+        pos1, vel1 = sat1.get_position(current_time)
+        pos2, vel2 = sat2.get_position(current_time)
+        
+        # Initial separation
+        initial_distance = np.linalg.norm(pos1 - pos2)
+        print(f"Current separation: {initial_distance:.2f} km")
+        print(f"Time to closest approach: {collision_time_minutes} minutes")
+        
+        # Define optimization problem
+        def objective(delta_v):
+            """Minimize fuel usage while maximizing separation"""
+            # delta_v = [radial, along-track, cross-track] in m/s
+            
+            # Calculate new velocity after maneuver
+            vel_change = delta_v / 1000  # Convert m/s to km/s
+            new_vel = vel1 + vel_change
+            
+            # Simulate new trajectory (simplified)
+            future_time = current_time + timedelta(minutes=collision_time_minutes)
+            
+            # Propagate with modified velocity (simplified orbital mechanics)
+            time_delta = collision_time_minutes * 60  # seconds
+            new_pos1 = pos1 + new_vel * time_delta
+            
+            # Get predicted position of sat2
+            pos2_future, _ = sat2.get_position(future_time)
+            
+            # Calculate miss distance
+            miss_distance = np.linalg.norm(new_pos1 - pos2_future)
+            
+            # Cost function: minimize fuel, maximize miss distance
+            fuel_cost = np.linalg.norm(delta_v)
+            safety_reward = miss_distance
+            
+            # Combined objective (we want to minimize this)
+            total_cost = self.fuel_weight * fuel_cost - self.safety_weight * safety_reward
+            
+            return total_cost
+        
+        # Constraints
+        def constraint_fuel(delta_v):
+            """Ensure fuel usage is within limits"""
+            return self.max_delta_v - np.linalg.norm(delta_v)
+        
+        def constraint_safety(delta_v):
+            """Ensure minimum safe distance"""
+            vel_change = delta_v / 1000
+            new_vel = vel1 + vel_change
+            time_delta = collision_time_minutes * 60
+            new_pos1 = pos1 + new_vel * time_delta
+            future_time = current_time + timedelta(minutes=collision_time_minutes)
+            pos2_future, _ = sat2.get_position(future_time)
+            miss_distance = np.linalg.norm(new_pos1 - pos2_future)
+            return miss_distance - 25  # Minimum 25 km separation
+        
+        # Initial guess (small prograde burn)
+        x0 = np.array([0, 2, 0])  # m/s in each direction
+        
+        # Optimization bounds
+        bounds = [(-self.max_delta_v, self.max_delta_v)] * 3
+        
+        # Constraints
+        constraints = [
+            {'type': 'ineq', 'fun': constraint_fuel},
+            {'type': 'ineq', 'fun': constraint_safety}
+        ]
+        
+        # Run optimization
+        print("\n🧮 Running optimization algorithm...")
+        result = minimize(
+            objective,
+            x0,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 100}
+        )
+        
+        optimal_delta_v = result.x
+        
+        # Calculate results
+        fuel_used = np.linalg.norm(optimal_delta_v)
+        
+        # Calculate new miss distance
+        vel_change = optimal_delta_v / 1000
+        new_vel = vel1 + vel_change
+        time_delta = collision_time_minutes * 60
+        new_pos1 = pos1 + new_vel * time_delta
+        future_time = current_time + timedelta(minutes=collision_time_minutes)
+        pos2_future, _ = sat2.get_position(future_time)
+        new_miss_distance = np.linalg.norm(new_pos1 - pos2_future)
+        
+        # Determine burn direction
+        burn_components = {
+            'Radial': optimal_delta_v[0],
+            'Along-track': optimal_delta_v[1],
+            'Cross-track': optimal_delta_v[2]
+        }
+        
+        primary_burn = max(burn_components.items(), key=lambda x: abs(x[1]))
+        
+        print("\n✅ MANEUVER CALCULATED SUCCESSFULLY")
+        print("-" * 60)
+        print(f"Optimal ΔV: {fuel_used:.2f} m/s")
+        print(f"Primary burn direction: {primary_burn[0]} ({primary_burn[1]:.2f} m/s)")
+        print(f"New miss distance: {new_miss_distance:.2f} km")
+        print(f"Fuel efficiency: {(1 - fuel_used/self.max_delta_v)*100:.1f}%")
+        
+        maneuver = {
+            'delta_v': optimal_delta_v,
+            'magnitude': fuel_used,
+            'direction': primary_burn[0],
+            'components': burn_components,
+            'new_miss_distance': new_miss_distance,
+            'fuel_efficiency': (1 - fuel_used/self.max_delta_v)*100,
+            'execution_time': current_time + timedelta(minutes=collision_time_minutes/2)
+        }
+        
+        return maneuver
+    
+    def generate_maneuver_options(self, sat1, sat2, collision_time):
+        """Generate multiple maneuver options with different trade-offs"""
+        
+        print("\n📋 GENERATING MANEUVER OPTIONS")
+        print("=" * 60)
+        
+        options = []
+        
+        # Option 1: Minimum fuel
+        self.fuel_weight = 0.7
+        self.safety_weight = 0.3
+        min_fuel = self.calculate_maneuver(sat1, sat2, collision_time)
+        min_fuel['name'] = "Fuel Efficient"
+        min_fuel['description'] = "Minimum fuel consumption"
+        options.append(min_fuel)
+        
+        # Option 2: Maximum safety
+        self.fuel_weight = 0.1
+        self.safety_weight = 0.9
+        max_safety = self.calculate_maneuver(sat1, sat2, collision_time)
+        max_safety['name'] = "Maximum Safety"
+        max_safety['description'] = "Largest miss distance"
+        options.append(max_safety)
+        
+        # Option 3: Balanced
+        self.fuel_weight = 0.5
+        self.safety_weight = 0.5
+        balanced = self.calculate_maneuver(sat1, sat2, collision_time)
+        balanced['name'] = "Balanced"
+        balanced['description'] = "Optimal trade-off"
+        options.append(balanced)
+        
+        return options
+    
+    def visualize_maneuver(self, maneuver):
+        """Create visualization of the maneuver plan"""
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Maneuver components
+        components = list(maneuver['components'].keys())
+        values = list(maneuver['components'].values())
+        colors = ['#ff4444', '#44ff44', '#4444ff']
+        
+        ax1.bar(components, values, color=colors)
+        ax1.set_title('Maneuver Components', fontweight='bold')
+        ax1.set_ylabel('ΔV (m/s)')
+        ax1.grid(True, alpha=0.3)
+        ax1.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+        
+        # Performance metrics
+        metrics = {
+            'Miss Distance': maneuver['new_miss_distance'],
+            'Fuel Used': maneuver['magnitude'],
+            'Efficiency': maneuver['fuel_efficiency']
+        }
+        
+        # Create spider plot
+        angles = np.linspace(0, 2*np.pi, len(metrics), endpoint=False).tolist()
+        values_norm = [
+            min(100, maneuver['new_miss_distance'] / 2),  # Normalize to 0-100
+            (1 - maneuver['magnitude'] / 10) * 100,  # Inverse fuel (less is better)
+            maneuver['fuel_efficiency']
+        ]
+        
+        angles += angles[:1]
+        values_norm += values_norm[:1]
+        
+        ax2 = plt.subplot(122, projection='polar')
+        ax2.plot(angles, values_norm, 'o-', linewidth=2, color='#00ff41')
+        ax2.fill(angles, values_norm, alpha=0.25, color='#00ff41')
+        ax2.set_xticks(angles[:-1])
+        ax2.set_xticklabels(metrics.keys())
+        ax2.set_ylim(0, 100)
+        ax2.set_title('Performance Metrics', fontweight='bold', pad=20)
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        # Check if we're in src directory and adjust path accordingly
+        save_path = '../models/maneuver_plan.png' if os.path.exists('../models') else 'models/maneuver_plan.png'
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
+        print(f"\n📊 Maneuver visualization saved to models/maneuver_plan.png")
+        
+        return fig
+    
+    def calculate_burn_schedule(self, maneuver):
+        """Calculate detailed burn schedule for execution"""
+        
+        schedule = []
+        execution_time = maneuver['execution_time']
+        
+        # Split maneuver into multiple burns if needed
+        total_dv = maneuver['magnitude']
+        
+        if total_dv > 5:  # Split large maneuvers
+            # Initial burn
+            schedule.append({
+                'time': execution_time - timedelta(minutes=10),
+                'duration': 30,  # seconds
+                'delta_v': maneuver['delta_v'] * 0.6,
+                'type': 'Primary burn'
+            })
+            
+            # Correction burn
+            schedule.append({
+                'time': execution_time,
+                'duration': 20,
+                'delta_v': maneuver['delta_v'] * 0.4,
+                'type': 'Correction burn'
+            })
+        else:
+            # Single burn
+            schedule.append({
+                'time': execution_time,
+                'duration': int(total_dv * 10),  # seconds
+                'delta_v': maneuver['delta_v'],
+                'type': 'Single burn'
+            })
+        
+        return schedule
+
+
+def demonstrate_maneuver_planning():
+    """Demonstration of maneuver planning capabilities"""
+    
+    print("=" * 70)
+    print("🎯 COLLISION AVOIDANCE MANEUVER PLANNING DEMONSTRATION")
+    print("=" * 70)
+    
+    # Create two satellites on collision course
+    iss_tle = [
         "1 25544U 98067A   24001.00000000  .00012345  00000-0  22456-3 0  9990",
         "2 25544  51.6416 339.5000 0001234  45.0000 315.0000 15.54477500300000"
-    ],
-    "STARLINK-1240": [
-        "1 45657U 20025A   24001.00000000  .00001234  00000-0  12345-4 0  9999",
-        "2 45657  51.6400 339.4800 0001450  45.1000 315.0500 15.54470000200000"
-    ],
-    "COSMOS-2251-DEBRIS": [  # Simulated debris from famous collision
-        "1 99999U 09001A   24001.00000000  .00001234  00000-0  12345-4 0  9999",
-        "2 99999  74.0400 120.0000 0015000  90.0000 270.0000 14.30000000100000"
-    ],
-    "TIANZHOU-2": [  # Chinese cargo spacecraft
-        "1 48432U 21035A   24001.00000000  .00001234  00000-0  12345-4 0  9999",
-        "2 48432  41.4700 200.0000 0002000  60.0000 300.0000 15.50000000150000"
-    ],
-    "HUBBLE": [
-        "1 20580U 90037B   24001.00000000  .00000800  00000-0  35841-4 0  9999",
-        "2 20580  28.4700 250.0000 0002829  45.0000 315.0000 15.09299720450000"
     ]
-}
-
-def create_debris_field(center_tle, num_debris=5, spread=0.01):
-    """Create space debris around a central object"""
-    debris_objects = []
-    base_line1, base_line2 = center_tle
     
-    for i in range(num_debris):
-        # Parse the TLE line 2 more carefully
-        # Format: 2 NNNNN III.IIII AAA.AAAA EEEEEEE PPP.PPPP MMM.MMMM MM.MMMMMMMMDDDDD
-        
-        # Extract key orbital elements from positions in the string
-        inclination = float(base_line2[8:16])  # Inclination
-        raan = float(base_line2[17:25])        # Right Ascension
-        eccentricity = base_line2[26:33]       # Eccentricity (keep as string)
-        arg_perigee = base_line2[34:42]        # Argument of perigee
-        mean_anomaly = base_line2[43:51]       # Mean anomaly
-        mean_motion = base_line2[52:63]        # Mean motion
-        rest = base_line2[63:]                 # Rest of the line
-        
-        # Modify inclination and RAAN slightly for debris
-        new_inclination = inclination + np.random.uniform(-spread*10, spread*10)
-        new_raan = raan + np.random.uniform(-spread*100, spread*100)
-        
-        # Ensure values stay in valid ranges
-        new_inclination = max(0, min(180, new_inclination))
-        new_raan = new_raan % 360
-        
-        # Reconstruct line 2 with exact formatting
-        modified_line2 = f"2 {base_line2[2:7]} {new_inclination:8.4f} {new_raan:8.4f} {eccentricity} {arg_perigee} {mean_anomaly} {mean_motion}{rest}"
-        
-        debris_objects.append([base_line1, modified_line2])
+    debris_tle = [
+        "1 99999U 09001A   24001.00000000  .00001234  00000-0  12345-4 0  9999",
+        "2 99999  51.6400 339.4900 0001450  45.0100 315.0100 15.54475000200000"
+    ]
     
-    return debris_objects
-
-def main():
-    print("=" * 70)
-    print("🚀 ADVANCED SATELLITE COLLISION AVOIDANCE SYSTEM")
-    print("=" * 70)
+    iss = Satellite(iss_tle[0], iss_tle[1], "ISS")
+    debris = Satellite(debris_tle[0], debris_tle[1], "DEBRIS-ALPHA")
     
-    # Create satellite objects
-    print("\n📡 Loading satellite constellation...")
-    satellites = []
-    colors = ['red', 'blue', 'green', 'orange', 'purple']
+    # Initialize planner
+    planner = ManeuverPlanner()
     
-    for i, (name, tle) in enumerate(SATELLITES.items()):
-        sat = Satellite(tle[0], tle[1], name)
-        satellites.append((sat, colors[i % len(colors)]))
-        print(f"   ✓ {name}")
+    # Calculate maneuver options
+    collision_time = 45  # minutes
+    options = planner.generate_maneuver_options(iss, debris, collision_time)
     
-    # Add space debris
-    print("\n💫 Generating space debris field...")
-    debris_field = create_debris_field(SATELLITES["COSMOS-2251-DEBRIS"], num_debris=8)
-    for i, debris_tle in enumerate(debris_field):
-        debris = Satellite(debris_tle[0], debris_tle[1], f"DEBRIS-{i+1}")
-        satellites.append((debris, 'gray'))
-    print(f"   ✓ Added {len(debris_field)} debris objects")
-    
-    # Initialize systems
-    detector = CollisionDetector()
-    visualizer = OrbitVisualizer()
-    
-    # Propagate all orbits
-    print("\n🔄 Calculating orbital trajectories for all objects...")
-    start_time = datetime.now()
-    for sat, _ in satellites:
-        sat.propagate_orbit(start_time, 3, step_minutes=2)
-    
-    # Check all collision pairs
-    print("\n🔍 Analyzing collision risks between all objects...")
-    print("-" * 70)
-    
-    high_risk_pairs = []
-    all_risks = []
-    
-    for i in range(len(satellites)):
-        for j in range(i+1, len(satellites)):
-            sat1, _ = satellites[i]
-            sat2, _ = satellites[j]
-            
-            # Skip debris-to-debris comparisons for clarity
-            if "DEBRIS" in sat1.name and "DEBRIS" in sat2.name:
-                continue
-            
-            risk = detector.check_collision_risk(sat1, sat2, time_horizon_hours=3)
-            all_risks.append((sat1.name, sat2.name, risk))
-            
-            # Report significant risks
-            if risk['risk_level'] in ['CRITICAL', 'HIGH', 'MEDIUM']:
-                high_risk_pairs.append((sat1, sat2, risk))
-                
-                # Color code the output
-                risk_color = {
-                    'CRITICAL': '\033[91m',  # Red
-                    'HIGH': '\033[93m',      # Yellow
-                    'MEDIUM': '\033[94m'     # Blue
-                }
-                color = risk_color.get(risk['risk_level'], '')
-                reset = '\033[0m'
-                
-                print(f"{color}⚠️  {sat1.name} ↔ {sat2.name}")
-                print(f"   Distance: {risk['min_distance_km']:.2f} km | "
-                      f"Time: {risk['time_to_closest']} min | "
-                      f"Risk: {risk['risk_level']}{reset}")
-    
-    if not high_risk_pairs:
-        print("✅ No significant collision risks detected")
-    else:
-        print(f"\n🚨 Found {len(high_risk_pairs)} potential collision risks!")
-    
-    # Visualize everything
-    print("\n🎨 Generating 3D visualization...")
-    visualizer.add_earth()
-    
-    # Add all satellite orbits
-    for sat, color in satellites:
-        if "DEBRIS" in sat.name:
-            # Make debris smaller and semi-transparent
-            visualizer.fig.add_trace(go.Scatter3d(
-                x=[pos[0] for pos in sat.positions[::3]],  # Sample every 3rd point
-                y=[pos[1] for pos in sat.positions[::3]],
-                z=[pos[2] for pos in sat.positions[::3]],
-                mode='markers',
-                name=sat.name,
-                marker=dict(size=2, color='gray', opacity=0.3),
-                showlegend=False
-            ))
-        else:
-            visualizer.add_satellite_orbit(sat, color=color)
-    
-    # Add collision warning markers for high-risk pairs
-    for sat1, sat2, risk in high_risk_pairs[:3]:  # Show top 3 risks
-        # Find closest approach point
-        idx = risk['time_to_closest'] // 2
-        if idx < len(sat1.positions) and idx < len(sat2.positions):
-            pos = (sat1.positions[idx] + sat2.positions[idx]) / 2
-            visualizer.add_collision_point(pos, risk['risk_level'])
-    
-    # Statistics panel
     print("\n" + "=" * 70)
-    print("📊 SYSTEM STATISTICS")
+    print("📊 MANEUVER OPTIONS COMPARISON")
     print("=" * 70)
-    print(f"🛰️  Active Satellites: {len([s for s,_ in satellites if 'DEBRIS' not in s.name])}")
-    print(f"💫 Debris Objects: {len([s for s,_ in satellites if 'DEBRIS' in s.name])}")
-    print(f"📏 Total Tracked Objects: {len(satellites)}")
-    print(f"⚠️  High Risk Encounters: {len(high_risk_pairs)}")
-    print(f"✅ Collision Checks Performed: {len(all_risks)}")
     
-    print("\n🌐 Opening interactive 3D view in browser...")
-    visualizer.show()
+    for i, option in enumerate(options, 1):
+        print(f"\n Option {i}: {option['name']}")
+        print(f"   Description: {option['description']}")
+        print(f"   ΔV Required: {option['magnitude']:.2f} m/s")
+        print(f"   Miss Distance: {option['new_miss_distance']:.2f} km")
+        print(f"   Fuel Efficiency: {option['fuel_efficiency']:.1f}%")
+        print(f"   Primary Burn: {option['direction']}")
     
-    print("\n✨ Analysis complete! Check your browser for the interactive visualization.")
-    print("   Use mouse to rotate/zoom. Click legend items to show/hide orbits.")
+    # Select optimal maneuver
+    optimal = options[2]  # Balanced option
+    print(f"\n✅ RECOMMENDED: {optimal['name']} approach")
+    
+    # Generate burn schedule
+    schedule = planner.calculate_burn_schedule(optimal)
+    
+    print("\n🔥 BURN SCHEDULE")
+    print("-" * 60)
+    for burn in schedule:
+        print(f"   {burn['type']}")
+        print(f"   Time: {burn['time'].strftime('%H:%M:%S')}")
+        print(f"   Duration: {burn['duration']} seconds")
+        print(f"   ΔV: {np.linalg.norm(burn['delta_v']):.2f} m/s")
+    
+    # Visualize the maneuver
+    planner.visualize_maneuver(optimal)
+    
+    print("\n✨ Maneuver planning complete!")
+    print("   The AI has calculated optimal collision avoidance strategies")
+    print("   balancing fuel efficiency with safety margins.")
+    
+    return optimal
+
 
 if __name__ == "__main__":
-    main()
+    # Run demonstration
+    maneuver = demonstrate_maneuver_planning()
+    
+    print("\n" + "=" * 70)
+    print("🚀 MANEUVER PLANNER READY FOR INTEGRATION")
+    print("=" * 70)
+    print("\nThis AI-powered maneuver planner can be integrated with:")
+    print("  • Real-time collision detection system")
+    print("  • Mission control dashboard")
+    print("  • Automated collision avoidance system")
+    print("  • Satellite command & control interface")

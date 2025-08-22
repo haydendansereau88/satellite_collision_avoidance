@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
@@ -218,7 +219,10 @@ class ManeuverPlanner:
         ax2.grid(True)
         
         plt.tight_layout()
-        plt.savefig('models/maneuver_plan.png', dpi=100, bbox_inches='tight')
+        # Check if we're in src directory and adjust path accordingly
+        save_path = '../models/maneuver_plan.png' if os.path.exists('../models') else 'models/maneuver_plan.png'
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=100, bbox_inches='tight')
         print(f"\n📊 Maneuver visualization saved to models/maneuver_plan.png")
         
         return fig
